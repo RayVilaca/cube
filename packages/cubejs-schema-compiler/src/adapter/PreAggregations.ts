@@ -329,7 +329,7 @@ export class PreAggregations {
             min: 'min',
             max: 'max'
           }[m.measureDefinition().type];
-          return `${fname}(${m.aliasName()})`;
+          return `${fname}(${m.preAggregationColumnName()})`;
         });
     }
     return [];
@@ -1685,7 +1685,7 @@ export class PreAggregations {
                   this.query.cubeEvaluator.isMeasure(path) ?
                     this.query.newMeasure(path) :
                     this.query.newDimension(path);
-                return member.aliasName();
+                return member.preAggregationColumnName();
               }
             })
           })
@@ -1750,12 +1750,12 @@ export class PreAggregations {
         }
 
         const measurePath = measure.path();
-        const column = this.query.ungrouped ? measure.aliasName() : (this.query.aggregateOnGroupedColumn(
+        const column = this.query.ungrouped ? measure.preAggregationColumnName() : (this.query.aggregateOnGroupedColumn(
           measure.measureDefinition(),
-          measure.aliasName(),
+          measure.preAggregationColumnName(),
           !this.query.safeEvaluateSymbolContext().overTimeSeriesAggregate,
           path,
-        ) || `sum(${measure.aliasName()})`);
+        ) || `sum(${measure.preAggregationColumnName()})`);
         if (measurePath === null) {
           return [[path, column]];
         }
@@ -1775,7 +1775,7 @@ export class PreAggregations {
       .flatMap(path => {
         const measure = this.query.newMeasure(path);
         const measurePath = measure.path();
-        const alias = measure.aliasName();
+        const alias = measure.preAggregationColumnName();
         if (measurePath === null) {
           return [[path, alias]];
         }
@@ -1795,7 +1795,7 @@ export class PreAggregations {
       .flatMap(path => {
         const dimension = this.query.newDimension(path);
         const dimensionPath = dimension.path();
-        const column = this.query.escapeColumnName(dimension.unescapedAliasName());
+        const column = dimension.preAggregationColumnName();
         if (dimensionPath === null) {
           return [[path, column]];
         }
@@ -1814,7 +1814,7 @@ export class PreAggregations {
     return Object.fromEntries(timeDimensions
       .flatMap(td => {
         const timeDimension = this.query.newTimeDimension(td);
-        const column = this.query.escapeColumnName(timeDimension.unescapedAliasName(rollupGranularity));
+        const column = timeDimension.preAggregationColumnName(rollupGranularity);
         const memberPath = this.query.cubeEvaluator.pathFromArray(timeDimension.path());
         // Return both full join path and dimension path
         return [

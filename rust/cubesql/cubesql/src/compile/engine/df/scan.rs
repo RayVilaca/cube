@@ -19,6 +19,7 @@ pub use datafusion::{
         array::{
             ArrayRef, BooleanBuilder, Date32Builder, DecimalBuilder, Float32Builder,
             Float64Builder, Int16Builder, Int32Builder, Int64Builder, NullArray, StringBuilder,
+            UInt64Builder,
         },
         datatypes::{DataType, Schema, SchemaRef},
         error::{ArrowError, Result as ArrowResult},
@@ -125,6 +126,10 @@ pub struct CubeScanOptions {
     pub max_records: Option<usize>,
     pub cache_mode: Option<CacheMode>,
     pub throw_continue_wait: bool,
+    /// The scan is wrapped, and its SQL is to be generated over a Cube Store
+    /// pre-aggregation: the plan is dropped for one over the data source when Cube
+    /// matches none
+    pub pre_aggregation: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1113,6 +1118,33 @@ macro_rules! transform_response_body {
                         }
                     )
                 }
+                // Cube Store answers a pushed down window function, like ROW_NUMBER, as
+                // an unsigned count, which the plan on top reads as such
+                DataType::UInt64 => {
+                    build_column!(
+                        DataType::UInt64,
+                        UInt64Builder,
+                        $response,
+                        field_name,
+                        {
+                            (FieldValue::Number(number), builder) => builder.append_value(number.round() as u64)?,
+                            (FieldValue::String(s), builder)  => match s.parse::<u64>() {
+                                Ok(v) => builder.append_value(v)?,
+                                Err(error) => {
+                                    warn!(
+                                        "Unable to parse value as u64: {}",
+                                        error.to_string()
+                                    );
+
+                                    builder.append_null()?
+                                }
+                            },
+                        },
+                        {
+                            (ScalarValue::UInt64(v), builder) => builder.append_option(*v)?,
+                        }
+                    )
+                }
                 DataType::Float32 => {
                     build_column!(
                         DataType::Float32,
@@ -1872,6 +1904,16 @@ mod tests {
                 todo!()
             }
 
+            async fn pre_aggregation_matches(
+                &self,
+                _span_id: Option<Arc<SpanId>>,
+                _queries: Vec<V1LoadRequestQuery>,
+                _ctx: AuthContextRef,
+                _meta_fields: LoadRequestMeta,
+            ) -> Result<Vec<bool>, CubeError> {
+                todo!()
+            }
+
             // Execute load query
             async fn load(
                 &self,
@@ -2043,6 +2085,7 @@ mod tests {
                 max_records: None,
                 cache_mode: None,
                 throw_continue_wait: false,
+                pre_aggregation: false,
             },
             transport: get_test_transport(),
             meta: get_test_load_meta(DatabaseProtocol::PostgreSQL),

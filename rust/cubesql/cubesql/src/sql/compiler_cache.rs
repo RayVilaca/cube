@@ -7,7 +7,9 @@ use crate::{
     },
     config::ConfigObj,
     sql::AuthContextRef,
-    transport::{MetaContext, TransportService},
+    transport::{
+        LoadRequestMeta, MetaContext, SpanId, TransportLoadRequestQuery, TransportService,
+    },
     utils::egraph_hash,
     CubeError, MutexAsync, RWLockAsync,
 };
@@ -53,7 +55,22 @@ pub trait CompilerCache: Send + Sync + Debug {
         ctx: AuthContextRef,
         protocol: DatabaseProtocol,
     ) -> Result<Arc<CompilerCacheEntry>, CubeError>;
+
+    /// [`TransportService::pre_aggregation_matches`], remembered for the compiled model:
+    /// whether a rollup serves a cube query changes only with the model, which is a new
+    /// entry, or with the security context, which keys the answer along with the query
+    async fn pre_aggregation_matches(
+        &self,
+        cache_entry: Arc<CompilerCacheEntry>,
+        span_id: Option<Arc<SpanId>>,
+        queries: Vec<TransportLoadRequestQuery>,
+        ctx: AuthContextRef,
+        meta_fields: LoadRequestMeta,
+    ) -> Result<Vec<bool>, CubeError>;
 }
+
+// Rollup verdicts are small, so a model keeps many of them
+const PRE_AGGREGATION_MATCHES_CACHE_SIZE: u64 = 10_000;
 
 #[derive(Debug)]
 pub struct CompilerCacheImpl {
@@ -67,6 +84,7 @@ pub struct CompilerCacheEntry {
     rewrite_rules: RWLockAsync<HashMap<bool, Arc<Vec<CubeRewrite>>>>,
     parameterized_cache: MokaCache<[u8; 32], CubeEGraph>,
     queries_cache: MokaCache<[u8; 32], CubeEGraph>,
+    pre_aggregation_matches: MokaCache<String, bool>,
 }
 
 crate::di_service!(CompilerCacheImpl, [CompilerCache]);
@@ -222,6 +240,10 @@ impl CompilerCache for CompilerCacheImpl {
                             .max_capacity(self.config_obj.query_cache_size())
                             .time_to_idle(ttl)
                             .build(),
+                        pre_aggregation_matches: MokaCache::builder()
+                            .max_capacity(PRE_AGGREGATION_MATCHES_CACHE_SIZE)
+                            .time_to_idle(ttl)
+                            .build(),
                     });
                     compiler_id_to_entry.put(
                         (meta_context.compiler_id, protocol.clone()),
@@ -231,6 +253,82 @@ impl CompilerCache for CompilerCacheImpl {
                 })
         };
         Ok(cache_entry)
+    }
+
+    async fn pre_aggregation_matches(
+        &self,
+        cache_entry: Arc<CompilerCacheEntry>,
+        span_id: Option<Arc<SpanId>>,
+        queries: Vec<TransportLoadRequestQuery>,
+        ctx: AuthContextRef,
+        meta_fields: LoadRequestMeta,
+    ) -> Result<Vec<bool>, CubeError> {
+        let security_context = ctx
+            .security_context()
+            .map(serde_json::to_string)
+            .transpose()?
+            .unwrap_or_default();
+        let mut keys = Vec::with_capacity(queries.len());
+        for query in &queries {
+            keys.push(format!(
+                "{security_context}\0{}",
+                serde_json::to_string(query)?
+            ));
+        }
+
+        let mut matches = Vec::with_capacity(queries.len());
+        let mut unknown: Vec<(usize, &String)> = Vec::new();
+        for (index, key) in keys.iter().enumerate() {
+            match cache_entry.pre_aggregation_matches.get(key).await {
+                Some(matched) => matches.push(Some(matched)),
+                None => {
+                    matches.push(None);
+                    if !unknown.iter().any(|(_, known)| *known == key) {
+                        unknown.push((index, key));
+                    }
+                }
+            }
+        }
+        if !unknown.is_empty() {
+            let answers = self
+                .transport
+                .pre_aggregation_matches(
+                    span_id,
+                    unknown
+                        .iter()
+                        .map(|(index, _)| queries[*index].clone())
+                        .collect(),
+                    ctx,
+                    meta_fields,
+                )
+                .await?;
+            if answers.len() != unknown.len() {
+                return Err(CubeError::internal(format!(
+                    "Pre-aggregation match answered for {} queries, asked for {}",
+                    answers.len(),
+                    unknown.len()
+                )));
+            }
+            for ((_, key), matched) in unknown.iter().zip(answers) {
+                cache_entry
+                    .pre_aggregation_matches
+                    .insert((*key).clone(), matched)
+                    .await;
+            }
+            for (index, key) in keys.iter().enumerate() {
+                if matches[index].is_none() {
+                    matches[index] = cache_entry.pre_aggregation_matches.get(key).await;
+                }
+            }
+        }
+        matches
+            .into_iter()
+            .map(|matched| {
+                matched.ok_or_else(|| {
+                    CubeError::internal("Pre-aggregation match verdict missing".to_string())
+                })
+            })
+            .collect()
     }
 }
 

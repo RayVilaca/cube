@@ -124,7 +124,7 @@ impl PreAggregationProcessor<'_> {
                 let branch_dim = Self::find_branch_member(dim, &item.dimensions, branch_cube_name)?;
                 select_builder.add_projection_reference_member(
                     &dim,
-                    QualifiedColumnName::new(None, branch_dim.alias()),
+                    QualifiedColumnName::new(None, branch_dim.canonical_alias()),
                     Some(dim.alias()),
                 );
             }
@@ -156,7 +156,7 @@ impl PreAggregationProcessor<'_> {
                 } else {
                     String::new()
                 };
-                let name_in_table = format!("{}{}", branch_base.alias(), read_suffix);
+                let name_in_table = format!("{}{}", branch_base.canonical_alias(), read_suffix);
 
                 let out_suffix = if let Some(granularity) = &granularity {
                     format!("_{}", granularity)
@@ -174,7 +174,7 @@ impl PreAggregationProcessor<'_> {
                 let branch_meas = Self::find_branch_member(meas, &item.measures, branch_cube_name)?;
                 select_builder.add_projection_reference_member(
                     &meas,
-                    QualifiedColumnName::new(None, branch_meas.alias()),
+                    QualifiedColumnName::new(None, branch_meas.canonical_alias()),
                     Some(meas.alias()),
                 );
             }

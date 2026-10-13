@@ -275,3 +275,96 @@ views:
     });
   });
 });
+
+describe('CompilerApi externalPreAggregationMembers', () => {
+  // cubesql plans a scan over a Cube Store rollup only when the scan's members fit one
+  // of these sets, so each external rollup has to show up with every member it holds,
+  // rollup joins expanded and views spelled in their own member names.
+  const model = `
+cubes:
+  - name: orders
+    sql: SELECT * FROM orders
+    joins:
+      - name: customers
+        sql: "{CUBE}.customer_id = {customers}.id"
+        relationship: many_to_one
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: status
+        sql: status
+        type: string
+      - name: created_at
+        sql: created_at
+        type: time
+    measures:
+      - name: count
+        type: count
+    pre_aggregations:
+      - name: main
+        external: true
+        dimensions:
+          - status
+          - customers.gender
+        measures:
+          - count
+        time_dimension: created_at
+        granularity: day
+      - name: internal
+        external: false
+        dimensions:
+          - status
+  - name: customers
+    sql: SELECT * FROM customers
+    dimensions:
+      - name: id
+        sql: id
+        type: number
+        primary_key: true
+      - name: gender
+        sql: gender
+        type: string
+    measures:
+      - name: count
+        type: count
+
+views:
+  - name: orders_view
+    cubes:
+      - join_path: orders
+        includes:
+          - status
+          - count
+      - join_path: orders.customers
+        prefix: true
+        includes:
+          - gender
+`;
+
+  test('lists the members of every external rollup, views in their own names', async () => {
+    const compilerApi = new CompilerApi(
+      {
+        localPath: () => '/mock/path',
+        dataSchemaFiles: () => Promise.resolve([{ fileName: 'orders.yml', content: model }]),
+      },
+      async () => 'postgres',
+      {
+        logger: () => {}, // eslint-disable-line @typescript-eslint/no-empty-function
+      }
+    );
+
+    try {
+      const rollups = (await compilerApi.externalPreAggregationMembers())
+        .map((members) => [...members].sort());
+
+      expect(rollups).toEqual([
+        ['customers.gender', 'orders.count', 'orders.created_at', 'orders.status'],
+        ['orders_view.count', 'orders_view.customers_gender', 'orders_view.status'],
+      ]);
+    } finally {
+      compilerApi.dispose();
+    }
+  });
+});
